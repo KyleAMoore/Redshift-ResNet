@@ -7,7 +7,7 @@ from SciServer.Authentication import login
 import SciServer.CasJobs as cj
 import SciServer.SciDrive as sd
 
-from constants import (TABLE_DOWNLOAD_URL,
+from .constants import (TABLE_DOWNLOAD_URL,
                        HEADERS,
                        REQUEST_DATA,
                        CASJOBS_CONTAINER)
@@ -53,8 +53,6 @@ class CasjobsDownloader:
                                        'password': self.passwd
                                    })
         assert res.status_code == 200
-        context_cookie = requests.cookies.create_cookie(domain='skyserver.sdss.org', name='SELECTED_CONTEXT', value='MyDB')
-        # casjobs_session.cookies.update(context_cookie)
         REQUEST_DATA['customQuery'] = 'SELECT * FROM {0}'.format(table_name)
         REQUEST_DATA['scidrivePath'] = '/casjobs_container'
         HEADERS['Referer'] = TABLE_DOWNLOAD_URL.format(table_name, 'TABLE', 'MyDB', 'normal')
@@ -62,6 +60,7 @@ class CasjobsDownloader:
                                    data=REQUEST_DATA,
                                    headers=HEADERS,
                                    allow_redirects=True)
+        assert res.status_code == 200, 'Failed to perform query {}'.format(res.text)
 
     def _create_container(self):
         """Clear the scidrive container"""
@@ -72,7 +71,7 @@ class CasjobsDownloader:
             pass
         time.sleep(3)
 
-    def _download_from_scidrive(self, table_name, save_to, max_tries=10, verbose=True):
+    def _download_from_scidrive(self, table_name, save_to, max_tries=20, verbose=True):
         """Check if the table is ready to download and download it once ready"""
         tgt_file_path = CASJOBS_CONTAINER + '/' + table_name + '_{}'.format(self.uname) + '.csv'
         count = 0
@@ -93,7 +92,4 @@ class CasjobsDownloader:
         print('could not download file')
 
 
-if __name__ == '__main__':
-    import os
-    cjd = CasjobsDownloader(os.environ['SCISERVER_USERNAME'], os.environ['SCISERVER_PASSWORD'])
-    cjd.download_query(query='SELECT * FROM SDSS_DR12', table_name='SDSS_DR12', context='MyDB')
+
