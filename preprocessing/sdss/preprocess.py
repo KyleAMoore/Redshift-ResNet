@@ -1,10 +1,18 @@
 import os
+from pathlib import Path
+
+import math
+
 from tempfile import mkdtemp
+
 from datetime import datetime
+
 import shutil
-import pandas as pd
+
+import subprocess
 
 from collections import deque
+
 from multiprocessing import Pool
 
 from SciServer.Config import isSciServerComputeEnvironment
@@ -15,9 +23,12 @@ from astropy import units as u
 from astropy.visualization.lupton_rgb import make_lupton_rgb
 
 import numpy as np
+import pandas as pd
+
 import click
 
 from logger_factory import LoggerFactory
+from constants import SAS_URL, SWARP_COMMAND
 from sdss_utils import get_guid
 from checkpoint_objects import CheckPoint, RedShiftCheckPointObject
 
@@ -52,16 +63,14 @@ class PreProcess:
                                                'DEBUG',
                                                add_file_handler=True,
                                                filename='preprocess.log')
-        self.url = 'https://dr12.sdss.org/sas/dr12/boss/photoObj/frames/' \
-                   '{rerun}/{run}/{camcol}/frame-{band}-{run_str}-{camcol}-{field}.fits.bz2'
+        self.url = SAS_URL
         self.images_meta = images_meta
         if isinstance(images_meta, str) and images_meta.endswith('.csv'):
             self.images_meta = pd.read_csv(images_meta)
         self.galaxies = self._randomize_meta(num_samples)
-        self.uname = uname
         self.output_image_size = output_image_size
         self.checkpoint_steps = checkpoint_steps
-        self.swarp_config_file = os.path.abspath(os.path.join(os.path.dirname(__file__), config_file))
+        self.swarp_config_file = Path(__file__).parent.resolve() / config_file
         self.uname = uname
         self.checkpoint_dir = checkpoint_dir
         self.overwrite_checkpoints = overwrite_checkpoints
@@ -71,6 +80,7 @@ class PreProcess:
             if uname is None:
                 raise Exception('Please provide a username for science server.')
             self.fits_download_loc = '/home/idies/workspace/Temporary/{}/scratch'.format(self.uname)
+            self.checkpoint_dir = '/home/idies/workspace/Temporary/{}/scratch/{}'.format(self.uname, checkpoint_dir)
 
         else:
             self.fits_download_loc = mkdtemp()
@@ -83,11 +93,14 @@ class PreProcess:
         return self.images_meta.sample(frac=num_samples / self.images_meta.shape[0])
 
     def run(self):
-        rundir = os.getcwd()
-        shutil.rmtree(os.path.join(rundir, 'galaxies'), ignore_errors=True)
-        os.mkdir(os.path.join(rundir, 'galaxies'))
+        rundir = Path(self.checkpoint_dir)
+        if not rundir.resolve().exists():
+            os.makedirs(rundir)
+        if not self.overwrite_checkpoints:
+            shutil.rmtree(rundir / 'galaxies', ignore_errors=True)
+        os.makedirs(rundir / 'galaxies', exist_ok=True)
         self.logger.debug('Created a directory called {} to save lupton-rgb images'
-                          .format(os.path.join(rundir, 'galaxies')))
+                          .format(rundir / 'galaxies'))
         process_pool = PreProcess.get_process_pool(self.num_processes)
 
         [process_pool.apply_async(self._run_preprocess_for_one_ckpt,
@@ -103,7 +116,7 @@ class PreProcess:
     def _save_ckpt(self, obj_guid):
         if obj_guid == 'SKIP_SENTINEL':
             return
-        self.logger.info('Completed preprocessing for galaxies (GUID): '.format(obj_guid['guid']))
+        self.logger.info('Completed preprocessing for galaxies (GUID): {}'.format(obj_guid['guid']))
         ckpt = CheckPoint(self.checkpoint_dir, obj_guid['obj'], obj_guid['guid'])
         ckpt.save_checkpoint(overwrite=True)
         self.logger.info('Checkpoint saved as {}'.format(ckpt.get_loc()))
@@ -115,7 +128,7 @@ class PreProcess:
 
     def _form_checkpoint_blocks(self):
         rows = self.galaxies.shape[0]
-        num_checkpoints = rows // self.checkpoint_steps
+        num_checkpoints = math.ceil(rows / self.checkpoint_steps)
         if num_checkpoints == 0:
             num_checkpoints = 1
         self.logger.debug('{} Galaxies with {} checkpoint steps form will form {} checkpoints'
@@ -155,21 +168,40 @@ class PreProcess:
             for url in download_urls:
                 filename = url.split('/')[-1]
                 files.append(self.fits_download_loc + '/' + filename)
-                self.logger.debug('Downloading compressed file'
-                                  ' from the sdss url to {}'.format(self.fits_download_loc + '/' + filename))
-                os.system('wget {0} -O {1}'.format(url, self.fits_download_loc + '/' + filename))
+
+                if Path(self.fits_download_loc).joinpath(filename.replace('.bz2', '')).exists():
+                    self.logger.debug('Compressed file exists, skipping download.')
+                else:
+                    self.logger.debug('Downloading compressed file {}'
+                                      ' from the sdss url to {}'.format(filename,
+                                                                        self.fits_download_loc + '/' + filename))
+                    subprocess.run('wget {0} -O {1}'.format(url,
+                                                            self.fits_download_loc + '/' + filename),
+                                   shell=True,
+                                   stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL,
+                                   check=True)
                 dl_count += 1
 
             os.chdir(self.fits_download_loc)
             # Check all the files exist
-            assert [os.path.exists(file) for file in files] == [True] * 5
+            assert [os.path.exists(file) or os.path.exists(file.replace('.bz2', ''))
+                    for file in files] == [True] * 5, 'Compressed or uncompressed files  missing'
 
             # Extract the fits files
             fits_files = []
             for file in files:
-                op = os.system('bzip2 -dkf {}'.format(file))
-                assert op == 0
-                os.remove(file)
+                if Path(file).exists():
+                    op = subprocess.run('bzip2 -dkf {}'.format(file),
+                                        capture_output=False,
+                                        shell=True,
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL,
+                                        check=False)
+                    assert op.returncode == 0, f'Error decompressing the fits file {file}'
+                    os.remove(file)
+                else:
+                    assert Path(file.replace('.bz2', '')).exists(), f"Uncompressed file doesn't exist"
                 fits_files.append(file.replace('.bz2', ''))
 
             # Check if the files exist
@@ -179,7 +211,7 @@ class PreProcess:
 
             data_mat = self._apply_swarp(galaxy, fits_files, cleanup=True)
             os.chdir(run_dir)
-            image_filename = '{0}/{1}-{2}-{3}.jpg'.format(os.path.join(run_dir, 'galaxies'),
+            image_filename = '{0}/{1}-{2}-{3}.jpg'.format(os.path.join(self.checkpoint_dir, 'galaxies'),
                                                           'galaxy', galaxy['specObjID'], galaxy['z'])
             make_lupton_rgb(data_mat[:, :, 3],
                             data_mat[:, :, 2],
@@ -189,7 +221,8 @@ class PreProcess:
             self.logger.debug('Galaxy image saved as {}'.format(image_filename))
             assert dl_count == 5, 'Downloaded only {} fits files'.format(dl_count)
 
-            self.logger.debug('Completed pre-processing for this galaxy with redshift value {}'.format(galaxy['z']))
+            self.logger.debug('Completed pre-processing for this galaxy with redshift value {} at index {}'
+                              .format(galaxy['z'], galaxy_count))
             redshift_objects.append(RedShiftCheckPointObject(np_array=data_mat,
                                                              redshift=galaxy['z'],
                                                              galaxy_meta=galaxy,
@@ -197,7 +230,6 @@ class PreProcess:
                                                              timestamp=datetime.now()))
             galaxy_count += 1
             dl_count = 0
-        assert galaxy_count == self.checkpoint_steps
         return {'obj': redshift_objects, 'guid': guid}
 
     def _apply_swarp(self, galaxy, fits_files, cleanup=True):
@@ -206,13 +238,12 @@ class PreProcess:
         data_mat = None
         self.logger.debug('The galaxy is centered at {0},{1}'.format(*center))
         for i, fits_file in enumerate(fits_files):
-            ret = os.system('swarp {0}[0] -c {1} -CENTER {2},{3}'
-                            ' -IMAGEOUT_NAME {4} -WEIGHTOUT_NAME {5}'
-                            .format(fits_file, self.swarp_config_file,
-                                    center[0], center[1],
-                                    'coadd-preprocess{}-{}.fits'.format(os.getpid(), i + 1),
-                                    'coadd.weight-preporcess{}-{}.fits'.format(os.getpid(), i + 1))
-                            )
+            ret = PreProcess.run_swarp_subprocess(
+                fits_file=fits_file,
+                config_file=self.swarp_config_file,
+                center=center,
+                image_out='coadd-preprocess{}-{}.fits'.format(os.getpid(), i + 1),
+                weight_out='coadd.weight-preporcess{}-{}.fits'.format(os.getpid(), i + 1))
             if ret != 0:
                 raise Exception('Error processing the input image')
 
@@ -261,6 +292,29 @@ class PreProcess:
         return tuple(coords)
 
     @staticmethod
+    def run_swarp_subprocess(fits_file,
+                             config_file,
+                             center,
+                             image_out,
+                             weight_out):
+        try:
+            subprocess.run(
+                args='swarp '
+                     f'{fits_file}[0] '
+                     f' -c {config_file} '
+                     f' -CENTER {center[0]},{center[1]} '
+                     f' -IMAGEOUT_NAME {image_out} '
+                     f' -WEIGHTOUT_NAME {weight_out} ',
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                capture_output=False,
+                check=True)
+        except subprocess.CalledProcessError:
+            return -1
+        return 0
+
+    @staticmethod
     def get_process_pool(num):
         return Pool(processes=num)
 
@@ -292,8 +346,7 @@ class PreProcess:
               type=int,
               help='The output image size')
 @click.option('-o', '--overwrite-checkpoints',
-              default=True,
-              type=bool,
+              is_flag=True,
               help='If set, overwrite the existing checkpoints')
 @click.option('--checkpoint-dir',
               default=os.getcwd(),

@@ -6,8 +6,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from logger_factory import LoggerFactory
-
 
 @dataclass
 class RedShiftCheckPointObject:
@@ -89,12 +87,14 @@ class CheckPoint(object):
     def from_checkpoint(cls, obj_pkl):
         with open(obj_pkl, 'rb+') as obj:
             checkpoint_obj = pickle.load(obj)
-        assert isinstance(checkpoint_obj, CheckPoint)
+        # assert isinstance(checkpoint_obj, .CheckPoint), type(checkpoint_obj)
+        print(type(checkpoint_obj))
         return checkpoint_obj
 
 
-
-
-
+if __name__ == '__main__':
+    object_ = CheckPoint.from_checkpoint('/home/umesh/Downloads/8aa325d55bc2d254d8b8ccbf886ff9886446ab7c.ckpt')
+    for redshift_obj in object_.metaclass:
+        print(redshift_obj.np_array, redshift_obj.redshift)
 
 

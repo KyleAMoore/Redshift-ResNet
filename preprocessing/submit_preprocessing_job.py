@@ -97,7 +97,7 @@ class SciServerJobRunner:
 
 if __name__ == '__main__':
     SciServerJobRunner.login_sciserver(os.environ['SCISERVER_USERNAME'], os.environ['SCISERVER_PASSWORD'])
-    SciServerJobRunner.set_job_config('Small Jobs Domain', 'SciServer Essentials')
+    SciServerJobRunner.set_job_config('Large Jobs Domain', 'SciServer Essentials')
     # SciServerJobRunner.download_casjobs_query(query='SELECT * FROM SDSS_DR12',
     #                                           table_name='SDSS_DR12',
     #                                           save_to='data',
