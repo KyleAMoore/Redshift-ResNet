@@ -4,8 +4,9 @@ on:
   schedule:
     - cron: 0 */12 * * *
   push:
-    - branches:
-        - 13-submit-job-action
+    branches:
+      - 13-submit-job-action
+
   jobs:
     submit:
       runs-on: ubuntu-latest
