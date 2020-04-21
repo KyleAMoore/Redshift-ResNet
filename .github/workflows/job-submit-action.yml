@@ -3,9 +3,6 @@ name: Submit Job to Sciserver Compute
 on:
   schedule:
     - cron: 0 */12 * * *
-  push:
-    branches:
-      - 13-submit-job-action
 
 jobs:
   submit:
@@ -42,4 +39,4 @@ jobs:
           SCISERVER_USERNAME: ${{ secrets.SCISERVER_USERNAME }}
           SCISERVER_PASSWORD: ${{ secrets.SCISERVER_PASSWORD }}
         run: |
-          cd preprocessing && python3 submit_preprocessing_job.py
+          cd preprocessing && python3 submit_preprocessing_job.py -J "Large Jobs Domain"
