@@ -1,7 +1,7 @@
 """
 This script runs the preprocessing pipeline in sciserver-compute
 1. Upload the code repo to sciserver-files.
-2. Install Requiremets
+2. Install Requirements
 3. Mount Data Volumes
 4. Randomize the csv based on dataSize
 5. Operate on the data and apply swarp to the dataset
