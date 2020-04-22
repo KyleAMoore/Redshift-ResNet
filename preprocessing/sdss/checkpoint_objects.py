@@ -1,11 +1,16 @@
 import pickle
+import json
 import os
+from pathlib import Path
+import shutil
 from datetime import datetime
+import time
 
 from dataclasses import dataclass
 
 import numpy as np
 
+from sdss_utils import get_hash
 from logger_factory import LoggerFactory
 
 
@@ -20,148 +25,190 @@ class RedShiftCheckPointObject:
     timestamp: datetime
 
 
-class CheckPoint(object):
-    """A generic checkpointer class
+class CheckPointer:
+    """A generic checkpointer
 
     This class provides a basic checkpoint support for saving sdss images.
     The objects are saved to disk using pickle.
 
     Parameters
     ----------
-    checkpoint_dir : str or Path like
-        The directory to save the checkpoint in
-    metaclass: instance of Object
-        The class for which to save checkpoint objects for
-    guid: str
-        Global identifier for this checkpoint
-    meta_objects: dict, default=None
-        a dictionary containing metaobjects' key as key and meta objects as values
+    ckpt_dir : str or Path like
+        The directory in which checkpoints are to be created
+    guid : str
+        The global unique identifier for this checkpoint, all the checkpoint files
+        and metadta will be saved in a directory named `guid` inside the `ckpt_dir`
+    metaclass : type
+        The python class of which objects are created and saved in memory for
+    overwrite : bool, default=False
+        If True, overwrite the existing checkpoint files saved on disk
+    meta_objects : list of dict or `metaclass` instances, default=None
+        A list of meta_objects to initialize the checkpoint with
+    max_objects : int, default=1000
+        Maximum objects threshold for pickling
+
+    Attributes
+    ----------
+    pkl_dir : Path
+        The directory to save pickle files
+    objs_in_disk : Path
+        The file which saves information about objects in disk
+    metadata_file : Path
+        The file which saves information about each checkpoint step
     """
-    def __init__(self, checkpoint_dir, metaclass, guid, meta_objects=None):
-        self.created_at = datetime.now()
-        self.checkpoint_dir = checkpoint_dir
-        if not os.path.exists(self.checkpoint_dir) and not os.path.isdir(self.checkpoint_dir):
-            os.makedirs(self.checkpoint_dir)
-        self.metaclass = metaclass
+    def __init__(self,
+                 ckpt_dir,
+                 guid,
+                 metaclass,
+                 overwrite=False,
+                 meta_objects=None,
+                 max_objects=1000):
         self.guid = guid
+        ckpt_path = Path(ckpt_dir).resolve()
+
+        if not ckpt_path.exists():
+            os.makedirs(ckpt_path)
+
+        self.pkl_dir = (ckpt_path / guid)
+        self.objs_in_disk = ckpt_path / f'{guid}.txt'
+        self.metadata_file = ckpt_path / guid / 'metadata.json'
         self.logger = LoggerFactory.get_logger(self.__class__.__name__,
-                                               'DEBUG')
-        self.meta_objects = self._validate_metaobjects(meta_objects)
-        self.meta_keys = set(self.meta_objects.keys())
+                                               level=10)
+        if overwrite:
+            self.logger.debug('Overwriting checkpoint files if they exist')
+            shutil.rmtree(self.pkl_dir, ignore_errors=True)
+            if self.objs_in_disk.exists():
+                os.remove(self.objs_in_disk)
 
-    def _validate_metaobjects(self, meta_objects):
-        """Validate `meta_objects` as instances of the metaclass"""
-        if meta_objects is None:
-            return {}
+        os.makedirs(self.pkl_dir, exist_ok=True)
+
+        if self.objs_in_disk.exists():
+            with self.objs_in_disk.open('r') as objs_file:
+                self.obj_set = set(objs_file.read().split(','))
+            self.last_modified = os.path.getmtime(self.objs_in_disk)
         else:
-            for obj in meta_objects.values():
-                assert isinstance(obj, self.metaclass), \
-                    'Invalid object of type {}, for class {}'.format(type(obj), self.metaclass)
-            return meta_objects
+            self.obj_set = set()
+            self.last_modified = time.time()
 
-    def save_checkpoint(self, obj_kwargs_list=None, overwrite=True):
-        """Save the checkpoint object
+        self.metaclass = metaclass
+        self.max_objects = max_objects
+        self.logger.debug(f'The checkpoints were last modified at '
+                          f'{time.strftime("%b %d %Y %H:%M:%S", time.localtime(self.last_modified))}')
+        self.save_objects(meta_objects)
 
-        This function saves the checkpoint object as a pkl file in the checkpoint directory
-
-        Arguments:
-        ----------
-        obj_kwargs : list of dict
-            A list of kwargs to self.meta_class
-        overwrite : bool, default=True
-            If True, this will remove the old objects if they exist in the checkpointer
-        """
-        if obj_kwargs_list is not None:
-
-            for obj_kwargs in obj_kwargs_list:
-                if overwrite:
-                    self.meta_keys.discard(obj_kwargs['key'])
-                    exists = self.meta_objects.pop(obj_kwargs['key'], None)
-                    if exists:
-                        self.logger.debug(f'Key {obj_kwargs["key"]} already exists in the checkpoint. Overwriting')
-                if obj_kwargs['key'] not in self.meta_keys:
-                    checkpoint_object = self.metaclass(**obj_kwargs)
-                    self.meta_objects[obj_kwargs['key']] = checkpoint_object
-                    self.meta_keys.add(obj_kwargs['key'])
-                    self.logger.debug(f'Added checkpoint object with key {obj_kwargs["key"]} to the checkpoint')
-
-        with open(os.path.join(self.checkpoint_dir, self.guid + '.ckpt'), 'wb') as pklfile:
-            pickle.dump(self, pklfile)
-            self.logger.debug(f'Saved checkpoint with {len(self.meta_keys)} objects '
-                              f'as {os.path.join(self.checkpoint_dir, self.guid + ".ckpt")}')
-
-    def get_loc(self):
-        return os.path.join(self.checkpoint_dir, self.guid + '.ckpt')
-
-    @staticmethod
-    def checkpoint_exists(ckptdir, guid):
-        """Check whether a checkpoint with given guid exists
+    def save_objects(self, meta_objects=None):
+        """Save checkpoint objects and metadata
 
         Parameters
         ----------
-        ckptdir : str or os.path like
-            The directory to check for checkpoints
+        meta_objects : list of dict or instances of metaclass
+            List of
         """
-        if os.path.exists(os.path.join(ckptdir, guid + '.ckpt')):
-            return True
-        return False
+        if meta_objects is not None:
+            keys_to_save = []
+            objects_to_save = {}
+            if len(meta_objects) > self.max_objects:
+                raise ValueError(f'Cannot save more than {self.max_objects} for pickling.')
 
-    @staticmethod
-    def remove_ckpt(ckptdir, guid, throw=False):
-        """Remove the checkpoint with given guid
+            for obj_or_kwargs in meta_objects:
+                current_object = obj_or_kwargs
 
-        Parameters
-        ----------
-        ckptdir : str or os.path like
-            The directory to check for checkpoints
-        guid : str
-            The guid of the checkpoint
-        throw: bool, default=False
-            If true, throw an error if the checkpoint with given guid doesn't exist
-        """
-        filename = os.path.join(ckptdir, guid + '.ckpt')
-        if CheckPoint.checkpoint_exists(ckptdir, guid):
-            os.remove(filename)
+                if isinstance(current_object, dict):
+                    current_object = self.metaclass(**obj_or_kwargs)
+
+                if not isinstance(current_object, self.metaclass):
+                    raise TypeError(f'Cannot save object of type {type(current_object)}')
+
+                if current_object.key not in self.obj_set:
+                    self.logger.debug(f'{current_object.key} added to save objects list')
+                    objects_to_save[current_object.key] = current_object
+                    keys_to_save.append(current_object.key)
+                else:
+                    self.logger.info(f'{current_object.key} already saved in disk. Skipping...')
+
+            if len(objects_to_save) > 0:
+                self._save_pkl(objects_to_save)
+                self._update_objects_on_disk(keys_to_save)
+                self.last_modified = time.time()
+                self.logger.debug(f'Checkpoint update complete. Saving modification time to '
+                                  f'{time.strftime("%b %d %Y %H:%M:%S", time.localtime(self.last_modified))}')
+
+    def _save_pkl(self, objects_to_save):
+        """Save the pickle file and metadata on the pickle files"""
+        filename = f'{get_hash(objects_to_save.keys())}.pkl'
+        with (self.pkl_dir / filename).open('wb') as pkl_file:
+            pickle.dump(objects_to_save, pkl_file)
+
+        if self.metadata_file.exists():
+            with self.metadata_file.open('r') as meta_json:
+                metadata = json.load(meta_json)
         else:
-            if throw:
-                raise FileNotFoundError('Checkpoint file {} not found'.format(filename))
+            metadata = {}
 
-    @staticmethod
-    def get_object_set(ckptdir, guid):
-        """Return the set of object keys in the current checkpoint(on disk)
+        metadata[filename] = list(objects_to_save.keys())
 
-        Parameters
-        ----------
-        ckptdir : str or os.path like
-            Checkpoint directory to look in
-        guid: str
-            GUID for the checkpoint
+        with self.metadata_file.open('w') as meta_json:
+            json.dump(metadata, meta_json, indent=2)
+
+    def _update_objects_on_disk(self, keys_to_save):
+        """Update objects on disk"""
+        with self.objs_in_disk.open('a+') as keys_file:
+            keys_file.write(','.join(keys_to_save))
+            keys_file.write(',')
+
+        self.obj_set.update(set(keys_to_save))
+
+    def get_specific_object(self, obj_key):
+        """From the checkpoint dir return an object with specific key
+
+        Parameter
+        ---------
+        obj_key : str
+            A unique key representing the object in the checkpoint
 
         Returns
         -------
-        set
-            A set of meta object keys for this checkpoint (if exists)
+        instance of self.metaclass
+           the object of class self.metaclass if it exists
+
+        Raises
+        ------
+        KeyError
+            If the object doesn't exist in the current checkpoints
         """
-        checkpoint = os.path.join(ckptdir, f'{guid}.ckpt')
-        if not os.path.exists(checkpoint):
-            return set()
+        if not self.metadata_file.exists():
+            raise KeyError(f"{obj_key} doesn't exist in the checkpoints")
         else:
-            ckpt = CheckPoint.from_checkpoint(ckptdir, guid)
-            return ckpt.meta_keys
+            tgt_file = None
+            with self.metadata_file.open('r') as meta_json:
+                meta_dict = json.load(meta_json)
 
-    @classmethod
-    def from_checkpoint(cls, ckptdir, guid):
-        """Return checkpoint object from the pickle file"""
-        assert CheckPoint.checkpoint_exists(ckptdir, guid)
-        obj_pkl = os.path.join(ckptdir, guid + '.ckpt')
-        with open(obj_pkl, 'rb+') as obj:
-            checkpoint_obj = pickle.load(obj)
-        assert isinstance(checkpoint_obj, CheckPoint), type(checkpoint_obj)
-        checkpoint_obj.logger.debug(f'Restored checkpoint with guid {checkpoint_obj.guid}, '
-                                    f'number of objects: {len(checkpoint_obj.meta_keys)}')
-        return checkpoint_obj
+            for key, value in meta_dict.items():
+                value_set = set(value)
+                if obj_key in value_set:
+                    tgt_file = key
 
-    @staticmethod
-    def last_modified(ckptdir, guid):
-        assert CheckPoint.checkpoint_exists(ckptdir, guid)
-        return os.path.getmtime(os.path.join(ckptdir, f'{guid}.ckpt'))
+            if tgt_file is None:
+                raise KeyError(f"{obj_key} doesn't exist in the checkpoints")
+            else:
+                with (self.pkl_dir / tgt_file).open('rb') as objs_pkl:
+                    objects_dict = pickle.load(objs_pkl)
+                    return objects_dict[obj_key]
+
+    def return_all_objects_info(self):
+        """Return a dictionary of metadata on current checkpoint files"""
+        if not self.metadata_file.exists():
+            return {}
+
+        with self.metadata_file.open('r') as meta_json:
+            return json.load(meta_json)
+
+    def return_objects_for(self, checkpoint_file):
+        """given a checkpoint pickle filename, return all the objects stored in it"""
+        if not (self.pkl_dir / checkpoint_file).exists():
+            raise FileNotFoundError(f'Cannot find the checkpoint file {checkpoint_file} '
+                                    f'in the current checkpoint directory {self.pkl_dir.parent}')
+
+        with (self.pkl_dir / checkpoint_file).open('rb') as obj_pkl:
+            objects = pickle.load(obj_pkl)
+            return objects
